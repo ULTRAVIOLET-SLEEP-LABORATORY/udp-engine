@@ -1,28 +1,40 @@
 #! /usr/bin/env python3
 
-# /src/engine.py
+# udp_engine/src/engine.py
 # Author: Joshua Darrow     07.20.2026
 
+'''
+The basic structure of the code is as follows.
+The UDPEngine consists of two ports: the data port and control port.
+The UDPEngine also consists of four queues, two for each port.
+These are useful for communicating with biosignal sensors among other purposes.
 
+Finally, there are four threads whose jobs are something like this:
+1) Wait around listening for data
+2) As soon as data is received, run a list of operators/functions on the data.
+
+An example of this would be a thread that listens to one of the sockets.
+As soon as the socket receives data, it awakens the thread, which pushes the
+data to a queue. It's also possible to hook other functions to be called by
+the thread, but these functions should be made to run as fast as possible.
+'''
 
 import socket
 import threading
 from blocking_deque import BlockingDeque
 
-DEBUG = False
 
-
-class Engine:
+class UDPEngine:
     '''Engine for network operations and data structures.
     Manages queues.'''
 
-    def __init__(self, device_ip, device_control_port, device_data_port, local_ip, local_control_port, local_data_port):
+    def __init__(self, remote_ip, remote_control_port, remote_data_port, local_ip, local_control_port, local_data_port):
         '''Initialize all of the networking sockets and queues'''
 
         self.MAX_UDP_SIZE = 65535
-        self.device_ip = device_ip
-        self.device_control_port = device_control_port
-        self.device_data_prot = device_data_port
+        self.remote_ip = remote_ip
+        self.remote_control_port = remote_control_port
+        self.remote_data_prot = remote_data_port
         self.local_ip = local_ip
         self.local_control_port = local_control_port
         self.local_data_port = local_data_port
@@ -43,14 +55,25 @@ class Engine:
         self.control_socket.settimeout(self._recv_timeout)
         self.data_socket.settimeout(self._recv_timeout)
 
-        # out stream. List of callback functions that accept data from the out_tx_queue
-        self.ostream = []
+        # List to hold functions that process each stream.
+        # Avoid having operators add other operators to the list.
+        self.control_rx_operators = []
+        self.control_tx_operators = []
+        self.data_rx_operators = []
+        self.data_tx_operators = []
 
 
     def start(self):
         '''start all of the threads'''
         self._stop_event.clear()
 
+        # hook the default stream processors
+        self.control_rx_operators.append(self.control_rx_queue.append)
+        self.control_tx_operators.append(self.control_socket.sendto)
+        self.data_rx_operators.append(self.data_rx_queue.append)
+        #self.data_tx_operators.append(self.data_socket.sendto)
+
+        # initialize and start threads
         self.control_rx_thread = threading.Thread(target=self._run_control_rx_queue, daemon=True)
         self.control_tx_thread = threading.Thread(target=self._run_control_tx_queue, daemon=True)
         self.data_rx_thread = threading.Thread(target=self._run_data_rx_queue, daemon=True)
@@ -61,37 +84,48 @@ class Engine:
         self.data_rx_thread.start()
         self.out_tx_thread.start()
 
+
     def stop(self):
         self._stop_event.set()
 
+        # stop all threads
         for t in (self.control_rx_thread, self.control_tx_thread, self.data_rx_thread, self.out_tx_thread):
             t.join(timeout=2.0)
 
-        self.control_socket.close()
+        self.control_socket.close()     # close sockets
         self.data_socket.close()
+
 
     def _run_control_rx_queue(self):
         '''listen to the control socket and push to the control queue'''
 
         while not self._stop_event.is_set():
             try:
-                received_command, _addr = self.control_socket.recvfrom(self.MAX_UDP_SIZE)
+                received_command, _addr = self.control_socket.recvfrom(self.MAX_UDP_SIZE)           # Receive from socket
             except socket.timeout:
                 continue
-            if DEBUG: print("[Control RX Queue] Response: ", received_command)
-            self.control_rx_queue.append(received_command)
-
+            logger.debug("[Control RX Queue] Received: %r", received_command)                       # log reception
+            for function in self.control_rx_operators:                                              # iterate though operators and run them on the received
+                try:
+                    function(received_command)                                                      # e.g. push to queue for processing
+                except Exception:
+                    logger.exception("operator %r raised", function)
+            
 
     def _run_control_tx_queue(self):
-        '''listen to the control queue and send commands to board via socket'''
+        '''listen to the control queue and send commands to board (remote) via socket'''
 
         while not self._stop_event.is_set():
             try:
                 command = self.control_tx_queue.popleft(timeout=self._recv_timeout)
             except TimeoutError:
                 continue
-            if DEBUG: print("[Control TX Queue] Sending: ", command)
-            self.control_socket.sendto(command, (self.device_ip, self.device_control_port))
+            logger.debug("[Control TX Queue] Sending: %r", received_command)
+            for function in self.control_tx_operators:
+                try:
+                    function(command, (self.remote_ip, self.remote_control_port))   # send data via socket, etc.
+                except Exception:
+                    logger.exception("operator %r raised", function)
 
 
     def _run_data_rx_queue(self):
@@ -102,19 +136,26 @@ class Engine:
                 received_data, _addr = self.data_socket.recvfrom(self.MAX_UDP_SIZE)
             except socket.timeout:
                 continue
-            if DEBUG: print("[Data RX Queue] Received: ", received_data)
-            self.data_rx_queue.append(received_data)
+            logger.debug("[Data RX Queue] Received: %r", received_data)
+            for function in self.data_rx_operators:
+                try:
+                    function(received_data)
+                except Exception:
+                    logger.exception("operator %r raised", function)
 
 
     def _run_out_tx_queue(self):
-        '''listen to the out queue and send data out via lsl'''
+        '''listen to the out queue and send data out e.g. via lsl'''
 
         while not self._stop_event.is_set():
             try:
                 data = self.out_tx_queue.popleft(timeout=self._recv_timeout)
             except TimeoutError:
                 continue
-            if DEBUG: print("[Data TX Queue] Sending: ", data)
-            for function in self.ostream:
-                function(data)
+            logger.debug("[Data TX Queue] Sending: %r", data)
+            for function in self.data_tx_operators:
+                try:
+                    function(data, (self.remote_ip, self.remote_control_port))   # send data via socket, etc.
+                except Exception:
+                    logger.exception("operator %r raised", function)
 

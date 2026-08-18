@@ -1,8 +1,12 @@
 #! /usr/bin/env python3
 
-# /src/blocking_deque.py
+# udp_engine/src/blocking_deque.py
 # Author: Joshua Darrow     07.20.2026
 
+'''
+Deque that blocks read on empty and always allows writing.
+Designed for asynchronous, even-driven, multithreaded applications.
+'''
 
 from collections import deque
 
