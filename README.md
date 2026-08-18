@@ -1,5 +1,5 @@
 # udp-engine
-Manage sockets and queues for network communications with biosignal sensors.
+Manages sockets and queues for network communications with biosignal sensors.
 
 
 ### Structure
@@ -28,3 +28,6 @@ asyncio library. This may possibly improve performance during high throughput
 due to reduced context switching, but I believe the gains are minimal since 
 threads and processes are constantly being context switched anyway on most
 operating systems. 
+
+I also want to make it easy to spin up an arbitrary number of socket-queue
+systems by defining the engine from a config file or similar.
